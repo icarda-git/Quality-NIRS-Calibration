@@ -13,7 +13,7 @@ base::source("/Volumes/Macintosh HD — Data/Desktop/FIGS/icardaFIGSr/nir_api.R"
 
 
 ui <- dashboardPage(
-  dashboardHeader(title = "NIRS-Traits Data Analysis", titleWidth = 300),
+  dashboardHeader(title = "TraitWave Analytics", titleWidth = 300),
   dashboardSidebar(
     sidebarMenu(
       menuItem("Data Quality", tabName = "dataQuality", icon = icon("dashboard")),
@@ -172,8 +172,12 @@ ui <- dashboardPage(
                 collapsible = TRUE,width = 12,
                 # Model summary outputs
                 tabBox(width = 12,
-                    tabPanel("Model Summary", DTOutput("modelSummary")),
-                    tabPanel("Model Plots", plotOutput("modelPlots"))
+                    tabPanel("Model Summary", textOutput("modelSummary")),
+                    tabPanel("Model diagnosis", plotOutput("modelPlots")), 
+                    tabPanel("Coeffecients", plotOutput("modelCoefPlot")), 
+                    tabPanel("Selectivity Ratio", plotOutput("modelSelRatioPlot")), 
+                    tabPanel("Performance Metrics", plotOutput("modelPerfMetrPlot"))
+                    
                       )
                  )
               ),
@@ -481,6 +485,7 @@ server <- function(input, output, session) {
   # Update to handle a single preprocessing method selection and apply it
   observeEvent(input$runPreprocessing, {
     req(nirData(), traitData(), input$preprocessingMethod)
+    
     # Combine nirData and traitData
     Train_test_data <- nirData() %>%
     left_join(traitData(), by = "QualityLabPlotNumber")
@@ -496,9 +501,9 @@ server <- function(input, output, session) {
     dataList[[input$preprocessingMethod]] <- switch(input$preprocessingMethod,
                                                     "SNV" = prep.snv(as.matrix(Train_test_data[,-1])),
                                                     "MSC" = prep.msc(as.matrix(Train_test_data[,-1])),
-                                                    "SVG" = prep.savgol(Train_test_data[,-1], width = 21, porder =3, dorder = 0),
-                                                    "SVG 1stD" = prep.savgol(Train_test_data[,-1], width = 21, porder = 3, dorder = 1),
-                                                    "SVG 2nD" = prep.savgol(Train_test_data[,-1], width = 21, porder = 3, dorder = 2),
+                                                    "SVG" = prep.savgol(Train_test_data[,-1], width = 15, porder =3, dorder = 0),
+                                                    "SVG 1stD" = prep.savgol(Train_test_data[,-1], width = 15, porder = 3, dorder = 1),
+                                                    "SVG 2nD" = prep.savgol(Train_test_data[,-1], width = 15, porder = 3, dorder = 2),
                                                     "Area_Normalization" = prep.norm(Train_test_data[,-1], "area"),
                                                     "Length_Normalization" = prep.norm(Train_test_data[,-1], "length"),
                                                     default = Train_test_data[,-1]
@@ -615,10 +620,11 @@ server <- function(input, output, session) {
     yt <- combinedData[-trainIndex, 1]  # Test response
     
     # Fit PCA model
-    modelPCA <- mdatools::pca(Xc ,x.test = Xt, scale = TRUE, ncomp = 7)
+    modelPCA <- mdatools::pca(Xc ,x.test = Xt, scale = FALSE, ncomp = 7)
     
     # Store PCA model, trainIndex, and traitData for plotting
-    analysisResults(list(model = modelPCA, trainIndex = trainIndex, traitData = combinedData[, 1]))
+    analysisResults(list(model = modelPCA, trainIndex = trainIndex,
+                         traitData = combinedData[, 1], NIRData = combinedData[,-1]))
   })
   
   # PCA Scores with Selected Trait
@@ -627,12 +633,11 @@ server <- function(input, output, session) {
     
     results <- analysisResults() 
     
-      traitValuesForCalibration <- results$traitData[results$trainIndex, input$traittoplot]
+      traitValuesForCalibration <- results$traitData[results$trainIndex,input$traittoplot]
 
        plotScores(results$model, show.labels = FALSE,
                    main = paste("PCA Scores Colored by", input$traittoplot))
   })
-
   
   # Plot for PCA Loadings
   output$Loadings <- renderPlot({
@@ -731,6 +736,7 @@ server <- function(input, output, session) {
       
       withinLimits <- dataForPlotting$TraitValue >= classLimits[1] & dataForPlotting$TraitValue <= classLimits[2]
       dataForPlotting$Class[withinLimits] <- className
+      dataForPlotting <- dataForPlotting%>% filter(!is.na(TraitValue))
     }
     
     # Store the modified data for further processing
@@ -740,7 +746,7 @@ server <- function(input, output, session) {
     output$DensityPlot <- renderPlot({
       req(classData()) 
       
-      cleanDataForPlotting <- classData() %>% filter(!is.na(TraitValue))
+      cleanDataForPlotting <- classData() #%>% filter(!is.na(TraitValue))
       
       # Generate the plot
       p <- ggplot(cleanDataForPlotting, aes(x = TraitValue, group=Class, fill = Class)) +
@@ -752,8 +758,6 @@ server <- function(input, output, session) {
       p 
     })
   })
-  
-  
   
   ## Show trait values and classes
   output$TraitClasses <- renderDataTable({
@@ -769,7 +773,6 @@ server <- function(input, output, session) {
   
   
   ### Modeling and evaluation
-  
   output$modelSelection <- renderUI({
     if(input$taskType == "regression") {
       selectInput("modelType", "Select Model", choices = c("PLS", "IPLS"))
@@ -778,9 +781,37 @@ server <- function(input, output, session) {
     }
   })
   
-  # IPLS Interval Length Input
+  # Ensure that inputs to UI elements are valid
   output$intervalLength <- renderUI({
-
+    if(input$modelType == "IPLS" && !is.null(input$intervalLength) && input$intervalLength > 0) {
+      numericInput("intervalLength", "Interval Length", value = 10, min = 1, max = 100)
+    } else {
+      NULL
+    }
+  })
+  
+  # Initialize a reactive value to store the analysis results
+  analysisResults <- reactiveVal()
+  
+  # UI element to select the analysis method and trait to plot
+  output$modelSelection <- renderUI({
+    selectInput("multivariateAnalysis", "Select Multivariate Analysis Method",
+                choices = c("PCA", "IPLS", "PLS", "PLS-DA", "SIMCA"))
+  })
+  
+  # Event to run the selected analysis
+  
+  # UI for selecting model type based on the task
+  output$modelSelection <- renderUI({
+    if(input$taskType == "regression") {
+      selectInput("modelType", "Select Model", choices = c("PCA","PLS", "IPLS"))
+    } else if(input$taskType == "classification") {
+      selectInput("modelType", "Select Model", choices = c("PLS-DA", "SIMCA"))
+    }
+  })
+  
+  # UI for specifying interval length in IPLS (only relevant for IPLS)
+  output$intervalLength <- renderUI({
     if(input$modelType == "IPLS") {
       numericInput("intervalLength", "Interval Length", value = 10, min = 1, max = 100)
     } else {
@@ -788,40 +819,105 @@ server <- function(input, output, session) {
     }
   })
   
+  # Reactive storage for model results
+  ModelResult <- reactiveVal(NULL)
+  
   # Run Modeling Task
   observeEvent(input$runModel, {
-    req(input$modelType, preprocessedData(), classData())
+    req(input$modelType, preprocessedData(), input$taskType, classData())
+    
+    # Filter class data based on the task type
+    responseColumn <- if (input$taskType == "regression") {
+      "TraitValue"  # Column for regression
+    } else {
+      "Class"  # Column for classification
+    }
+    
+    # Combine preprocessed NIRS and filtered Class data
+    combinedData <- cbind(classData()[, c(responseColumn, "Class")], preprocessedData())
+    
+    # Data partitioning
+    set.seed(123)  # For reproducibility
+    trainIndex <- sample(nrow(combinedData), size = floor(0.75 * nrow(combinedData)))
+    
+    Xc <- combinedData[trainIndex, -c(1,2)]  # Calibration predictors
+    yc <- combinedData[trainIndex, 1]   # Calibration response
+    Xt <- combinedData[-trainIndex, -c(1,2)] # Test predictors
+    yt <- combinedData[-trainIndex, 1]  # Test response
     
     # Model fitting logic based on selected model type
-    fitModel <- switch(input$modelType,
-                       "PLS" = {
-                         # PLS model fitting code here
-                       },
-                       "IPLS" = {
-                         # IPLS model fitting code here, make sure to use input$intervalLength
-                       },
-                       
-                       "PLS-DA" = {
-                         # PLS-DA model fitting code here
-                       },
-                       
-                       "SIMCA" = {
-                         # SIMCA model fitting code here
-                       }
+    fittedModel <- switch(input$modelType,
+                          "PLS" = pls(Xc, yc, x.test =Xt, y.test = yt,  ncomp = 5, scale = TRUE),
+                          "IPLS" = ipls(Xc, yc, x.test =Xt, y.test = yt, ncomp = 5, intervals = input$intervalLength),
+                          "PLS-DA" = plsda(Xc, yc, x.test =Xt, ncomp = 5, scale = TRUE),
+                          "SIMCA" = simca(Xc, yc,x.test =Xt, y.test = yt, ncomp = 5, scale = TRUE),
+                          pca(Xc, x.test =Xt, ncomp = 5)  # Default fallback method
     )
-    
-    # FitModel will contain the fitted model and its results
-    
-    # Model Summary Output
-    output$modelSummary <- renderDT({
-      # Convert model summary to a data table
-    })
-    
-    # Model Plots Output
-    output$modelPlots <- renderPlot({
-      # Plotting logic based on fitModel
-    })
+    ModelResult(list(Model = fittedModel))  #Store the model result
   })
+  
+  
+  # Example to output the results
+  output$modelSummary <- renderPrint({
+    req(ModelResult())
+    summary(ModelResult()$Model)
+  })
+  
+  # Example to plot results
+  output$modelPlots <- renderPlot({
+    req(analysisResults(), ModelResult())
+    
+    if (input$modelType %in% c("PLS", "PLS-DA")) {
+      plot(ModelResult()$Model, comps = 1:2)
+    } else if (input$modeltype == "SIMCA") {
+      plot(ModelResult())
+    }
+  })
+
+  # output Model summary
+  output$modelSummary <- renderPrint({
+    req(ModelResult())
+    print(ModelResult()$Model$res)
+  })
+  
+  # output model diagnosis plots
+  output$modelPlots <- renderPlot({
+    req(analysisResults())
+    
+    if (input$modelType %in% c("PLS", "PLS-DA")) {
+      plot(ModelResult()$Model, comps = 1:2)
+    } else if (input$modeltype == "SIMCA") {
+      plot(ModelResult())
+    }
+  })
+  
+  # output modeleveluation Metrics
+
+    
+  output$modelCoeefPlot <- renderPlot({
+    req(analysisResults(), ModelResult())
+    
+    plotRegcoeffs(ModelResult()$Model, type="h", show.ci=T, show.labels=F)
+    plotRegcoeffs(ModelResult()$Model, type="l", show.ci=T, show.labels=F)
+  })  
+  
+  
+  output$modelSelRatioPlot <- renderPlot({
+    req(analysisResults(), ModelResult())
+    
+    plotVIPScores(ModelResult()$Model, ncomp = 5, type = "h", show.labels = F)
+    plotSelectivityRatio(ModelResult()$Model, ncomp = 5, type = "h", show.labels = F)
+    
+  })  
+  
+  output$modelPerfMetrPlot <- renderPlot({
+    req(analysisResults(), ModelResult())
+    
+    plotPredictions(ModelResult()$Model, ncomp = 5, show.stat=T, show.labels = F)
+    plotRMSE(ModelResult()$Model, ncomp = 5)
+    
+  })  
+  
 }
 
 # Run the application
