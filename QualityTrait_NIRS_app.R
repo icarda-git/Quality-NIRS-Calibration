@@ -9,7 +9,7 @@ library(dplyr)
 library(mdatools)
 library(caret)
 
-base::source("/Volumes/Macintosh HD — Data/Desktop/FIGS/icardaFIGSr/nir_api.R")
+base::source("nir_api.R")
 
 
 ui <- dashboardPage(
@@ -172,7 +172,7 @@ ui <- dashboardPage(
                   collapsible = TRUE,width = 12,
                   # Model summary outputs
                   tabBox(width = 12,
-                         tabPanel("Model Summary", textOutput("modelSummary")),
+                         tabPanel("Model Summary", verbatimTextOutput("modelSummary")),
                          tabPanel("Model diagnosis", plotOutput("modelPlots")), 
                          tabPanel("Coeffecients", plotOutput("modelCoefPlot")), 
                          tabPanel("Selectivity Ratio", plotOutput("modelSelRatioPlot")), 
@@ -283,7 +283,7 @@ server <- function(input, output, session) {
         Sys.sleep(0.1)  # Simulated delay for fetching data
       }
       fetchedNirData <- getNIRData(qualityLab = input$qualityLab, crop = input$crop, nir_model = input$nirModel, 
-                                   trial = input$trial, year = input$year, location = input$site)
+                                   trial = input$trial, year = input$year, location = input$site, country = input$country)
       nirData <- nirData(fetchedNirData)  # Update the reactive value
     })
   })
@@ -297,7 +297,7 @@ server <- function(input, output, session) {
         Sys.sleep(0.1)
       }
       fetchedTraitData <- getTraitsData(qualityLab = input$qualityLab, crop = input$crop, nir_model = input$nirModel, 
-                                        trial = input$trial, year = input$year, location = input$site)
+                                        trial = input$trial, year = input$year, location = input$site, country = input$country)
       traitData <- traitData(fetchedTraitData)  # Update the reactive value
     })
   })
@@ -584,7 +584,7 @@ server <- function(input, output, session) {
   observeEvent(input$runAnalysis, {
     req(input$multivariateAnalysis, input$traittoplot,traitData(), nirData())
     
-    withProgress(message = 'Traning Model...', value = 0, {
+    withProgress(message = 'Training Model...', value = 0, {
       for (k in 1:5) {
         incProgress(1/5)
         Sys.sleep(0.1)  # Simulated delay for fetching data
@@ -767,20 +767,22 @@ server <- function(input, output, session) {
   # UI for selecting model type based on the task
   output$modelSelection <- renderUI({
     if(input$taskType == "regression") {
-      selectInput("modelType", "Select Model", choices = c("PCA", "PLS", "IPLS", "RF", "SVM", "KNN"))
+      selectInput("modelType", "Select Model", choices = c("PCA", "PLS", "IPLS", "RF", "SVM", "KNN"), selected = "PCA")
     } else if(input$taskType == "classification") {
-      selectInput("modelType", "Select Model", choices = c("PLS-DA", "SIMCA", "RF", "SVM", "KNN"))
+      selectInput("modelType", "Select Model", choices = c("PLS-DA", "SIMCA", "RF", "SVM", "KNN"), selected = "PLS-DA")
     }
   })
   
   
   # UI for specifying interval length in IPLS (only relevant for IPLS)
   output$intervalLength <- renderUI({
+    req(input$modelType)
     if(input$modelType == "IPLS") {
       numericInput("intervalLength", "Interval Length", value = 10, min = 1, max = 100)
-    } else {
-      NULL
+    } else if(input$modelType == "SIMCA" || input$modelType == "PLS-DA"){
+      selectInput("className", "Select Class Name", choices = unique(classData()$Class))
     }
+    else NULL
   })
   
   
@@ -824,18 +826,19 @@ server <- function(input, output, session) {
       trainControl <- trainControl(method = "cv", number = 3, preProcOptions = list("scale", "center"))
       
       # Ensure classname in SIMCA has fewer than 20 symbols
-      if (input$modelType == "SIMCA") {
-        trainData$Class <- substr(trainData$Class, 1, 20)
-        testData$Class <- substr(testData$Class, 1, 20)
-      }
+      # if (input$modelType == "SIMCA") {
+      #   trainData$Class <- substr(trainData$Class, 1, 20)
+      #   testData$Class <- substr(testData$Class, 1, 20)
+      # }
       
       # Model fitting logic based on selected model type
+      
       fittedModel <- switch(input$modelType,
                             "PLS" = pls(trainData[, -1], trainData[[responseColumn]], x.test = testData[, -1], y.test = testData[[responseColumn]], ncomp = 5, scale = TRUE),
                             "IPLS" = ipls(trainData[, -1], trainData[[responseColumn]], x.test = testData[, -1], y.test = testData[[responseColumn]], 
                                           glob.ncomp = 5, int.num = input$intervalLength),
-                            "PLS-DA" = plsda(trainData[, -1], trainData[[responseColumn]], x.test = testData[, -1], y.test = testData[[responseColumn]], ncomp = 5, scale = TRUE),
-                            "SIMCA" = simca(trainData[, -1], trainData[[responseColumn]], x.test = testData[, -1], y.test = testData[[responseColumn]], ncomp = 5, scale = TRUE),
+                            "PLS-DA" = plsda(trainData[, -1], trainData[[responseColumn]], x.test = testData[, -1], c.test = testData[[responseColumn]], scale = TRUE, classname = input$className),
+                            "SIMCA" = simca(trainData[, -1], input$className, x.test = testData[, -1], c.test = testData[[responseColumn]], ncomp = 5, scale = TRUE),
                             "RF" = train(trainData[, -1], trainData[[responseColumn]], method = "rf", trControl = trainControl, tuneLength = 5),
                             "SVM" = train(trainData[, -1], trainData[[responseColumn]], method = "svmRadial", trControl = trainControl, tuneLength = 5),
                             "KNN" = train(trainData[, -1], trainData[[responseColumn]], method = "knn", trControl = trainControl, tuneLength = 5),
@@ -846,11 +849,10 @@ server <- function(input, output, session) {
   })
   
   
-  
   # output Model summary
   output$modelSummary <- renderPrint({
     req(ModelResult())
-    print(ModelResult()$Model)
+    summary(ModelResult()$Model)
   })
   
   # Plotting function for model overview
@@ -864,7 +866,7 @@ server <- function(input, output, session) {
     } else if (input$modelType == "SIMCA") {
       plot(model, main = "SIMCA Model")
     } else if (input$modelType == "RF") {
-      varImpPlot(model$finalModel)
+      randomForest::varImpPlot(model$finalModel)
     } else if (input$modelType == "SVM" || input$modelType == "KNN") {
       pred <- predict(model, ModelResult()$TestData[, -1])
       actual <- ModelResult()$TestData[[ModelResult()$ResponseColumn]]
